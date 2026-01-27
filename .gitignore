@@ -1,0 +1,11 @@
+.env
+data/
+tmp/
+bin/
+logs/
+scan_results/
+coverage.out
+coverage.html
+web/node_modules/
+web/dist/
+web/.env
