@@ -57,6 +57,12 @@ const NodeConfigDialog = ({
       configData = { repo };
     } else if (nodeType === "slack") {
       configData = { channel };
+    } else if (nodeType === "auto-fix") {
+      configData = {
+        repo,
+        path: initialData?.path || "",
+        vulnerability: initialData?.vulnerability || ""
+      };
     }
 
     onSave(configData);
@@ -122,6 +128,43 @@ const NodeConfigDialog = ({
                 placeholder="#general"
               />
             </div>
+          )}
+
+          {nodeType === "auto-fix" && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="repo">Override Repository (Optional)</Label>
+                <Select value={repo} onValueChange={setRepo}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Inherit from Trigger" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {githubRepos.map((repoName) => (
+                      <SelectItem key={repoName} value={repoName}>
+                        {repoName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                   Defaults to the repository defined in the Trigger.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="path">File Path (Optional)</Label>
+                <Input
+                  id="path"
+                  defaultValue={initialData?.path || ""}
+                  onChange={(e) => {
+                     initialData.path = e.target.value;
+                  }}
+                  placeholder="e.g. main.go"
+                />
+                <p className="text-xs text-muted-foreground">
+                   Leave blank to automatically fix files found by previous scanners (Dynamic).
+                </p>
+              </div>
+            </>
           )}
         </div>
 

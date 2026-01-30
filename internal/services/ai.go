@@ -88,15 +88,15 @@ Code:
 
 // GenerateSecurityRecommendations generates security recommendations
 func (s *AIService) GenerateSecurityRecommendations(ctx context.Context, scanResults string) (string, error) {
-	prompt := fmt.Sprintf(`Based on the following security scan results, provide detailed security recommendations:
+	prompt := fmt.Sprintf(`Based on the following security scan results and auto-fix actions, provide a detailed report:
 
-Scan Results:
+Scan Results & Actions:
 %s
 
 Please provide:
-1. Priority recommendations
-2. Quick wins (easy to implement)
-3. Long-term security improvements
+1. Executive Summary of Findings
+2. Review of Auto-Fix Actions taken (if any)
+3. Priority recommendations for remaining issues
 4. Best practices to follow`, scanResults)
 
 	if s.config.AI.GeminiAPIKey != "" {
@@ -156,6 +156,60 @@ func (s *AIService) ChatResponse(ctx context.Context, userMessage string, conver
 	}
 
 	return "", fmt.Errorf("no AI API keys configured")
+}
+
+// GenerateWorkflowJSON generates a workflow configuration from a prompt
+func (s *AIService) GenerateWorkflowJSON(ctx context.Context, userPrompt string) (string, error) {
+	prompt := fmt.Sprintf(`You are an expert Workflow Builder Assistant.
+Create a JSON configuration for a security workflow based on this request: "%s"
+
+The JSON must return an object with "nodes" and "edges" arrays.
+Node Types available: "trigger", "gobuster", "nikto", "nmap", "sqlmap", "wpscan", "owasp-vulnerabilities", "auto-fix", "email", "github-issue", "slack", "flow-chart".
+
+Rules:
+1. Always start with a "trigger" node.
+2. Use logical "positions" (x, y) so nodes are laid out left-to-right (e.g. x: 0, x: 300, x: 600).
+3. "edges" must connect nodes logically (source -> target).
+4. Return ONLY valid JSON. No markdown formatting.
+
+Example Structure:
+{
+  "nodes": [
+    { "id": "1", "type": "trigger", "position": { "x": 0, "y": 100 }, "data": { "sourceUrl": "https://example.com" } },
+    { "id": "2", "type": "nmap", "position": { "x": 300, "y": 100 }, "data": {} }
+  ],
+  "edges": [
+    { "id": "e1-2", "source": "1", "target": "2" }
+  ]
+}`, userPrompt)
+
+	if s.config.AI.GeminiAPIKey != "" {
+		result, err := s.callGemini(ctx, prompt)
+		if err == nil {
+			// Clean markdown if present
+			return cleanJSON(result), nil
+		}
+	}
+
+	if s.config.AI.GroqAPIKey != "" {
+		result, err := s.callGroq(ctx, prompt)
+		if err == nil {
+			return cleanJSON(result), nil
+		}
+	}
+
+	return "", fmt.Errorf("no AI API keys configured")
+}
+
+func cleanJSON(s string) string {
+	// Simple cleanup to remove ```json ... ``` wrapper if present
+	if len(s) > 7 && s[:7] == "```json" {
+		s = s[7:]
+		if len(s) > 3 && s[len(s)-3:] == "```" {
+			s = s[:len(s)-3]
+		}
+	}
+	return s
 }
 
 // callGemini makes a request to Google Gemini API

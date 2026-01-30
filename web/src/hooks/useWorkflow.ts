@@ -111,5 +111,9 @@ export const workflowApi = {
       console.error("Error getting execution results:", error);
       throw error;
     }
-  }
+  },
+
+  executeNode: (nodeData: any) => api.post("/workflows/execute-node", nodeData),
+  
+  generateWorkflow: (prompt: string) => api.post("/workflow/ai-generate", { prompt }),
 };

@@ -51,6 +51,7 @@ func main() {
 	scannerHandler := handlers.NewScannerHandler(scannerService)
 	codeHandler := handlers.NewCodeHandler(aiService, embeddingService)
 	chatbotHandler := handlers.NewChatbotHandler(aiService)
+	aiWorkflowHandler := handlers.NewAIWorkflowHandler(aiService)
 
 	// Create Gin router
 	router := gin.Default()
@@ -62,13 +63,14 @@ func main() {
 
 	// Setup routes
 	routes.SetupRoutes(router, &routes.RouterConfig{
-		AuthHandler:     authHandler,
-		WorkflowHandler: workflowHandler,
-		GitHubHandler:   githubHandler,
-		ScannerHandler:  scannerHandler,
-		CodeHandler:     codeHandler,
-		ChatbotHandler:  chatbotHandler,
-		JWTUtil:         jwtUtil,
+		AuthHandler:       authHandler,
+		WorkflowHandler:   workflowHandler,
+		GitHubHandler:     githubHandler,
+		ScannerHandler:    scannerHandler,
+		CodeHandler:       codeHandler,
+		ChatbotHandler:    chatbotHandler,
+		AIWorkflowHandler: aiWorkflowHandler,
+		JWTUtil:           jwtUtil,
 	})
 
 	// Start server

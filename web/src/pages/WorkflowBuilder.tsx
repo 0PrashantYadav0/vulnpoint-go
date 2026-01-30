@@ -19,7 +19,7 @@ import {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { toast } from "sonner";
-import { ArrowLeft, Save, Plus, Trash, X, Play } from "lucide-react";
+import { ArrowLeft, Save, Plus, Trash, X, Play, Sparkles } from "lucide-react";
 import { useTheme } from "@/components/shared/ThemeProvider";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +41,7 @@ import TriggerNode from "@/components/workflowbuilder/TriggerNode";
 import WorkflowNode from "@/components/workflowbuilder/WorkflowNode";
 import EmptyState from "@/components/dashboard/workflow/EmptyState";
 import NodeConfigDialog from "@/components/workflowbuilder/NodeConfigDialog";
+import AIAssistantSheet from "@/components/workflowbuilder/AIAssistantSheet";
 import { useWorkflowStore } from "@/lib/store";
 
 import { workflowApi } from "@/hooks/useWorkflow";
@@ -63,13 +64,19 @@ const nodeTypes: NodeTypes = {
   sqlmap: WorkflowNode,
   wpscan: WorkflowNode,
   "owasp-vulnerabilities": WorkflowNode,
+  "secret-scan": WorkflowNode,
+  "dependency-check": WorkflowNode,
+  "semgrep-scan": WorkflowNode,
+  "container-scan": WorkflowNode,
   "flow-chart": WorkflowNode,
+  "auto-fix": WorkflowNode,
   email: WorkflowNode,
   "github-issue": WorkflowNode,
   slack: WorkflowNode,
 };
 
-const TERMINAL_NODE_TYPES = ["email", "github-issue", "slack"];
+const TERMINAL_NODE_TYPES = ["email", "slack", "github-issue"];
+const CONFIGURABLE_NODE_TYPES = [...TERMINAL_NODE_TYPES, "auto-fix"];
 
 const WorkflowBuilderContent = () => {
   const { id } = useParams<{ id: string }>();
@@ -95,9 +102,47 @@ const WorkflowBuilderContent = () => {
   const [configNodeData, setConfigNodeData] = useState<any>(null);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [showAIAssistant, setShowAIAssistant] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const reactFlowInstance = useReactFlow();
+
+  const handleAIGenerate = async (prompt: string) => {
+    setIsGenerating(true);
+    try {
+      const response = await workflowApi.generateWorkflow(prompt);
+      // The API returns the raw JSON string directly or wrapped object depending on how we set up the handler
+      // Let's assume the handler returns { nodes: [...], edges: [...] } directly or we parse it
+      
+      let data = response.data;
+      if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch (e) {
+            console.error("Failed to parse AI response", e);
+            toast.error("AI response was not valid JSON");
+            setIsGenerating(false);
+            return;
+        }
+      }
+
+      if (data.nodes && data.edges) {
+        setNodes(data.nodes);
+        setEdges(data.edges);
+        toast.success("Workflow generated successfully!");
+        setShowAIAssistant(false);
+        setTimeout(() => reactFlowInstance.fitView({ padding: 0.2 }), 100);
+      } else {
+        toast.error("AI returned incomplete workflow data");
+      }
+    } catch (error) {
+      console.error("AI Generation failed:", error);
+      toast.error("Failed to generate workflow. Please try again.");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   useEffect(() => {
     const loadWorkflow = async () => {
@@ -301,6 +346,12 @@ const WorkflowBuilderContent = () => {
       return [
         "flow-chart",
         "owasp-vulnerabilities",
+        "secret-scan",
+        "dependency-check",
+        "semgrep-scan",
+        "container-scan",
+        "auto-fix",
+        "auto-fix",
         "email",
         "github-issue",
         "slack",
@@ -554,7 +605,12 @@ const WorkflowBuilderContent = () => {
     } else {
       return [
         { type: "owasp-vulnerabilities", label: "Owasp vulnerabilities" },
+        { type: "secret-scan", label: "Secret Scan" },
+        { type: "dependency-check", label: "Dependency Check" },
+        { type: "semgrep-scan", label: "Semgrep SAST" },
+        { type: "container-scan", label: "Container Scan" },
         { type: "flow-chart", label: "Flow Chart" },
+        { type: "auto-fix", label: "Auto Fix" },
         { type: "email", label: "Email" },
         { type: "github-issue", label: "GitHub Issue" },
         { type: "slack", label: "Slack" },
@@ -566,16 +622,14 @@ const WorkflowBuilderContent = () => {
     const node = nodes.find((n) => n.id === nodeId);
     if (!node) return;
 
-    
-
-    if (!TERMINAL_NODE_TYPES.includes(node.type as NodeType)) {
-      toast.info("Only terminal nodes can be configured");
+    if (!CONFIGURABLE_NODE_TYPES.includes(node.type as NodeType)) {
+      toast.info("This node type has no configuration");
       return;
     }
 
     setConfigNodeId(nodeId);
     setConfigNodeType(node.type as NodeType);
-    setConfigNodeData(node.data?.config || {});
+    setConfigNodeData(node.data?.config || node.data || {}); // Handle direct data for auto-fix
     setShowConfigDialog(true);
   };
 
@@ -583,7 +637,7 @@ const WorkflowBuilderContent = () => {
     (event: React.MouseEvent, node: Node) => {
       event.preventDefault();
       const workflowNode = node as Node<WorkflowNodeType>;
-      if (TERMINAL_NODE_TYPES.includes(workflowNode.type as NodeType)) {
+      if (CONFIGURABLE_NODE_TYPES.includes(workflowNode.type as NodeType)) {
         openNodeConfig(workflowNode.id);
       }
     },
@@ -608,6 +662,14 @@ const WorkflowBuilderContent = () => {
                 config: configData, // Wrapped in config for terminal nodes
               },
             };
+          } else if (configNodeType === "auto-fix") {
+             return {
+              ...node,
+              data: {
+                  ...node.data, // Preserve other data if needed
+                  ...configData // Validation: repo, path, vulnerability
+              }
+             }
           } else {
             return {
               ...node,
@@ -759,6 +821,15 @@ const WorkflowBuilderContent = () => {
             </Button>
 
             <Button
+              onClick={() => setShowAIAssistant(true)}
+              className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white"
+              variant="default" 
+            >
+              <Sparkles className="w-4 h-4" />
+              AI Assistant
+            </Button>
+
+            <Button
               onClick={executeWorkflow}
               className="gap-1.5"
               disabled={isLoading}
@@ -789,6 +860,13 @@ const WorkflowBuilderContent = () => {
         nodeType={configNodeType || "email"}
         initialData={configNodeData}
         onSave={saveNodeConfig}
+      />
+
+      <AIAssistantSheet
+        open={showAIAssistant}
+        onOpenChange={setShowAIAssistant}
+        onGenerate={handleAIGenerate}
+        isGenerating={isGenerating}
       />
     </>
   );

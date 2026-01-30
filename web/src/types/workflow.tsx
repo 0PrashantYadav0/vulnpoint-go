@@ -11,7 +11,12 @@ export type NodeType =
   | "sqlmap"
   | "wpscan"
   | "owasp-vulnerabilities"
+  | "secret-scan"
+  | "dependency-check"
+  | "semgrep-scan"
+  | "container-scan"
   | "flow-chart"
+  | "auto-fix"
   | "email"
   | "github-issue"
   | "slack";

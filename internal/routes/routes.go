@@ -8,13 +8,14 @@ import (
 )
 
 type RouterConfig struct {
-	AuthHandler     *handlers.AuthHandler
-	WorkflowHandler *handlers.WorkflowHandler
-	GitHubHandler   *handlers.GitHubHandler
-	ScannerHandler  *handlers.ScannerHandler
-	CodeHandler     *handlers.CodeHandler
-	ChatbotHandler  *handlers.ChatbotHandler
-	JWTUtil         *utils.JWTUtil
+	AuthHandler       *handlers.AuthHandler
+	WorkflowHandler   *handlers.WorkflowHandler
+	GitHubHandler     *handlers.GitHubHandler
+	ScannerHandler    *handlers.ScannerHandler
+	CodeHandler       *handlers.CodeHandler
+	ChatbotHandler    *handlers.ChatbotHandler
+	AIWorkflowHandler *handlers.AIWorkflowHandler
+	JWTUtil           *utils.JWTUtil
 }
 
 func SetupRoutes(router *gin.Engine, cfg *RouterConfig) {
@@ -41,6 +42,9 @@ func SetupRoutes(router *gin.Engine, cfg *RouterConfig) {
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware(cfg.JWTUtil))
 		{
+			// AI Workflow Generation
+			protected.POST("/workflow/ai-generate", cfg.AIWorkflowHandler.GenerateWorkflow)
+
 			// User routes
 			protected.GET("/user", cfg.AuthHandler.GetCurrentUser)
 

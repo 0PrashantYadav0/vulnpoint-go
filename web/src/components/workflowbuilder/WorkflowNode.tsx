@@ -10,6 +10,11 @@ import {
   MessageCircle,
   Workflow,
   ShieldQuestion,
+  Wrench,
+  Key,
+  Box,
+  Code2,
+  Container,
 } from "lucide-react";
 import { NodeType } from "@/types/workflow";
 
@@ -18,8 +23,8 @@ const WorkflowNode = memo(({ type, data, isConnectable }: NodeProps) => {
   // Cast the type to our NodeType to use in our switch statement
   const nodeType = type as NodeType;
 
-  // Determine if this node is a terminal node (email, GitHub issue, or Slack)
-  const isTerminalNode = ["email", "github-issue", "slack"].includes(nodeType);
+  // Determine if this node is a terminal node (email or Slack)
+  const isTerminalNode = ["email", "slack"].includes(nodeType);
 
   const getNodeConfig = () => {
     switch (nodeType) {
@@ -59,11 +64,41 @@ const WorkflowNode = memo(({ type, data, isConnectable }: NodeProps) => {
           icon: <ShieldQuestion className="w-5 h-5" />,
           color: "bg-blue-500",
         };
+      case "secret-scan":
+        return {
+          label: "Secret Scan",
+          icon: <Key className="w-5 h-5" />,
+          color: "bg-yellow-500",
+        };
+      case "dependency-check":
+        return {
+          label: "Dependency Check",
+          icon: <Box className="w-5 h-5" />,
+          color: "bg-purple-500",
+        };
+      case "semgrep-scan":
+        return {
+          label: "Semgrep SAST",
+          icon: <Code2 className="w-5 h-5" />,
+          color: "bg-indigo-500",
+        };
+      case "container-scan":
+        return {
+          label: "Container Scan",
+          icon: <Container className="w-5 h-5" />,
+          color: "bg-teal-500",
+        };
       case "flow-chart":
         return {
           label: "Flow Chart",
           icon: <Workflow className="w-5 h-5" />,
           color: "bg-cyan-500",
+        };
+      case "auto-fix":
+        return {
+          label: "Auto Fix",
+          icon: <Wrench className="w-5 h-5" />,
+          color: "bg-orange-500",
         };
       case "email":
         return {

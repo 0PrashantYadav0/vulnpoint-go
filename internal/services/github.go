@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,61 +52,77 @@ func NewGitHubService(db *gorm.DB) *GitHubService {
 	return &GitHubService{db: db}
 }
 
-// ListRepositories fetches repositories from GitHub API
+// ListRepositories fetches all repositories from GitHub API and syncs them to DB
 func (s *GitHubService) ListRepositories(ctx context.Context, accessToken string, userID uuid.UUID) ([]models.Repository, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user/repos?per_page=100", nil)
-	if err != nil {
-		return nil, err
-	}
+	var allRepositories []models.Repository
+	page := 1
 
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API error: %s", string(body))
-	}
-
-	var githubRepos []GitHubRepo
-	if err := json.NewDecoder(resp.Body).Decode(&githubRepos); err != nil {
-		return nil, err
-	}
-
-	// Convert and store in database
-	var repositories []models.Repository
-	for _, gr := range githubRepos {
-		repo := models.Repository{
-			UserID:      userID,
-			GitHubID:    gr.ID,
-			FullName:    gr.FullName,
-			Name:        gr.Name,
-			Description: gr.Description,
-			HTMLURL:     gr.HTMLURL,
-			Language:    gr.Language,
-			IsPrivate:   gr.Private,
+	for {
+		url := fmt.Sprintf("https://api.github.com/user/repos?per_page=100&page=%d", page)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
 		}
 
-		// Upsert repository
-		var existingRepo models.Repository
-		result := s.db.Where("git_hub_id = ?", gr.ID).First(&existingRepo)
-		if result.Error == gorm.ErrRecordNotFound {
-			s.db.Create(&repo)
-		} else {
-			s.db.Model(&existingRepo).Updates(repo)
-			repo = existingRepo
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
 		}
 
-		repositories = append(repositories, repo)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("GitHub API error: %s", string(body))
+		}
+
+		var githubRepos []GitHubRepo
+		if err := json.NewDecoder(resp.Body).Decode(&githubRepos); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+
+		if len(githubRepos) == 0 {
+			break
+		}
+
+		// Convert and store in database
+		for _, gr := range githubRepos {
+			repo := models.Repository{
+				UserID:      userID,
+				GitHubID:    gr.ID,
+				FullName:    gr.FullName,
+				Name:        gr.Name,
+				Description: gr.Description,
+				HTMLURL:     gr.HTMLURL,
+				Language:    gr.Language,
+				IsPrivate:   gr.Private,
+			}
+
+			// Upsert repository
+			var existingRepo models.Repository
+			result := s.db.Where("git_hub_id = ?", gr.ID).First(&existingRepo)
+			if result.Error == gorm.ErrRecordNotFound {
+				s.db.Create(&repo)
+			} else {
+				s.db.Model(&existingRepo).Updates(repo)
+				repo = existingRepo
+			}
+
+			allRepositories = append(allRepositories, repo)
+		}
+
+		if len(githubRepos) < 100 {
+			break
+		}
+		page++
 	}
 
-	return repositories, nil
+	return allRepositories, nil
 }
 
 // GetRepositoryFiles fetches file tree from GitHub
@@ -340,7 +357,7 @@ func (s *GitHubService) UpdateFile(ctx context.Context, accessToken, owner, repo
 
 	bodyReq := UpdateFileRequest{
 		Message: message,
-		Content: content, // Must be base64 encoded? GitHub API expects base64 unless using raw accept header for reading. For writing, struct `content` usually needs base64.
+		Content: base64.StdEncoding.EncodeToString([]byte(content)),
 		Sha:     sha,
 		Branch:  branch,
 	}

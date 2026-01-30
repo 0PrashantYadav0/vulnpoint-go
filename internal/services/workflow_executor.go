@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/datmedevil17/go-vuln/internal/models"
@@ -257,6 +258,18 @@ func (e *WorkflowExecutor) executeNode(node *WorkflowNode, previousResults map[s
 		return e.executeGitHubIssue(node, previousResults, userID)
 	case "auto-fix":
 		return e.executeAutoFix(node, previousResults, userID)
+	case "owasp-vulnerabilities":
+		return e.executeNikto(node, previousResults) // Map OWASP to Nikto for now
+	case "flow-chart":
+		return e.executeFlowChart(node, previousResults)
+	case "secret-scan":
+		return e.executeSecretScan(node, previousResults)
+	case "dependency-check":
+		return e.executeDependencyCheck(node, previousResults)
+	case "semgrep-scan":
+		return e.executeSemgrep(node, previousResults)
+	case "container-scan":
+		return e.executeContainerScan(node, previousResults)
 	default:
 		return nil, fmt.Errorf("unknown node type: %s", node.Type)
 	}
@@ -326,6 +339,7 @@ func (e *WorkflowExecutor) executeNikto(node *WorkflowNode, previousResults map[
 			"scanner": "nikto",
 			"target":  target,
 			"data":    jsonOutput,
+			"output":  string(output), // Include raw output for reporting
 			"status":  "completed",
 		}, nil
 	}
@@ -431,8 +445,19 @@ func (e *WorkflowExecutor) executeNotification(node *WorkflowNode, previousResul
 	var scanSummaries string
 	for nodeID, result := range previousResults {
 		if nodeMap, ok := result.(map[string]interface{}); ok {
-			if output, ok := nodeMap["output"].(string); ok {
+			// Check for structured data first
+			if data, ok := nodeMap["data"]; ok {
+				formatted := formatScanData(data)
+				scanSummaries += fmt.Sprintf("Node %s (%s) Output:\n%s\n\n", nodeID, nodeMap["scanner"], formatted)
+			} else if output, ok := nodeMap["output"].(string); ok {
 				scanSummaries += fmt.Sprintf("Node %s (%s) Output:\n%s\n\n", nodeID, nodeMap["scanner"], output)
+			}
+
+			// Special handling for Auto-Fix results
+			if nodeType, ok := nodeMap["type"].(string); ok && nodeType == "auto-fix" {
+				status := nodeMap["status"]
+				prURL := nodeMap["pr_url"]
+				scanSummaries += fmt.Sprintf("🛠️ Auto-Fix Action (Node %s):\nStatus: %s\nPR URL: %v\n\n", nodeID, status, prURL)
 			}
 		}
 	}
@@ -577,7 +602,11 @@ func (e *WorkflowExecutor) executeGitHubIssue(node *WorkflowNode, previousResult
 	var scanSummaries string
 	for nodeID, result := range previousResults {
 		if nodeMap, ok := result.(map[string]interface{}); ok {
-			if output, ok := nodeMap["output"].(string); ok {
+			// Check for structured data first
+			if data, ok := nodeMap["data"]; ok {
+				formatted := formatScanData(data)
+				scanSummaries += fmt.Sprintf("## Scan: %s (Node %s)\n%s\n\n", nodeMap["scanner"], nodeID, formatted)
+			} else if output, ok := nodeMap["output"].(string); ok {
 				scanSummaries += fmt.Sprintf("## Scan: %s (Node %s)\n```\n%s\n```\n\n", nodeMap["scanner"], nodeID, output)
 			}
 		}
@@ -642,8 +671,42 @@ func (e *WorkflowExecutor) executeAutoFix(node *WorkflowNode, previousResults ma
 		branch = val
 	}
 
+	// Dynamic Path Inference
+	// If path is missing, try to find it in previous scanner results
+	if path == "" {
+		log.Printf("🔍 Path not provided. searching previous scanner results...")
+		for _, result := range previousResults {
+			if resMap, ok := result.(map[string]interface{}); ok {
+				// Check Gitleaks/Semgrep findings
+				if output, ok := resMap["output"].(string); ok {
+					// Extremely simple heuristic to find a file path in JSON
+					// In a real app, unmarshal properly based on scanner type
+					if strings.Contains(output, `"file": "`) {
+						start := strings.Index(output, `"file": "`) + 9
+						end := strings.Index(output[start:], `"`)
+						if start > 9 && end > 0 {
+							path = output[start : start+end]
+							log.Printf("🎯 Inferred path from scanner: %s", path)
+							break
+						}
+					}
+					// Semgrep style
+					if strings.Contains(output, `"path": "`) {
+						start := strings.Index(output, `"path": "`) + 9
+						end := strings.Index(output[start:], `"`)
+						if start > 9 && end > 0 {
+							path = output[start : start+end]
+							log.Printf("🎯 Inferred path from scanner: %s", path)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if owner == "" || repo == "" || path == "" {
-		return nil, fmt.Errorf("auto-fix requires owner, repo, and path (target: %s)", target)
+		return nil, fmt.Errorf("auto-fix requires owner, repo, and path (target: %s). Could not infer path from scanner results.", target)
 	}
 
 	// 3. Fetch File Content
@@ -658,11 +721,28 @@ func (e *WorkflowExecutor) executeAutoFix(node *WorkflowNode, previousResults ma
 	if vulnerability == "" {
 		// If not provided, analyze the code now
 		log.Printf("🔍 Analyzing code for vulnerabilities...")
+
+		// Check for previous scanner results to help the analysis
+		var scannerContext string
+		for _, result := range previousResults {
+			if resMap, ok := result.(map[string]interface{}); ok {
+				if output, ok := resMap["output"].(string); ok {
+					scannerContext += fmt.Sprintf("Scanner Output (%s):\n%s\n\n", resMap["scanner"], output)
+				}
+			}
+		}
+
 		// Heuristic: determine language from extension
 		lang := "go" // default
 		// ... simplified language detection ...
 
-		analysis, err := e.aiService.AnalyzeCode(context.Background(), content, lang)
+		// Pass scanner context if available
+		inputContext := content
+		if scannerContext != "" {
+			inputContext = fmt.Sprintf("SCANNER FINDINGS:\n%s\n\nCODE TO FIX:\n%s", scannerContext, content)
+		}
+
+		analysis, err := e.aiService.AnalyzeCode(context.Background(), inputContext, lang)
 		if err != nil {
 			return nil, fmt.Errorf("analysis failed: %v", err)
 		}
@@ -719,6 +799,7 @@ func (e *WorkflowExecutor) executeAutoFix(node *WorkflowNode, previousResults ma
 		"pr_number": pr.Number,
 		"status":    "created",
 		"branch":    fixBranch,
+		"output":    fmt.Sprintf("Auto-Fix PR Created: %s", pr.HTMLURL),
 	}, nil
 }
 
@@ -747,4 +828,144 @@ func splitParam(s, sep string) []string {
 		parts = append(parts, current)
 	}
 	return parts
+}
+
+// executeFlowChart handles flow-chart nodes (pass-through)
+func (e *WorkflowExecutor) executeFlowChart(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("📊 Executing Flow Chart Node (Pass-through)")
+
+	target := e.getTarget(previousResults)
+
+	return map[string]interface{}{
+		"type":   "flow-chart",
+		"status": "completed",
+		"target": target,
+	}, nil
+}
+
+func formatScanData(data interface{}) string {
+	// If it's the specific Nikto format we use
+	if dataMap, ok := data.(map[string]interface{}); ok {
+		if vulns, ok := dataMap["vulnerabilities"].([]interface{}); ok {
+			var formatted string
+			for _, v := range vulns {
+				if vStr, ok := v.(string); ok {
+					formatted += fmt.Sprintf("- %s\n", vStr)
+				}
+			}
+			if formatted != "" {
+				return formatted
+			}
+		}
+	}
+
+	// Fallback to pretty JSON
+	bytes, _ := json.MarshalIndent(data, "", "  ")
+	return fmt.Sprintf("```json\n%s\n```", string(bytes))
+}
+
+// executeSecretScan simulates a Gitleaks scan
+func (e *WorkflowExecutor) executeSecretScan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🔑 Executing Secret Scan (Gitleaks)...")
+	time.Sleep(2 * time.Second) // Simulate work
+
+	// Mock findings: Using README.md as it likely exists in any repo
+	output := `
+{
+  "findings": [
+    {
+      "rule": "generic-secret",
+      "file": "README.md",
+      "startLine": 1,
+      "secret": "password123",
+      "message": "Simulated secret found for Auto-Fix testing"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "gitleaks",
+		"status":  "completed",
+		"output":  output,
+		"data": map[string]interface{}{
+			"leaked_secrets": 1,
+			"files_scanned":  15,
+		},
+	}, nil
+}
+
+// executeDependencyCheck simulates a Trivy/SCA scan
+func (e *WorkflowExecutor) executeDependencyCheck(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("📦 Executing Dependency Check (Trivy)...")
+	time.Sleep(2 * time.Second)
+
+	output := `
+{
+  "Target": "go.mod",
+  "Vulnerabilities": [
+    {
+      "VulnerabilityID": "CVE-2023-1234",
+      "PkgName": "golang.org/x/net",
+      "InstalledVersion": "v0.7.0",
+      "FixedVersion": "v0.17.0",
+      "Severity": "HIGH"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "trivy-sca",
+		"status":  "completed",
+		"output":  output,
+		"data": map[string]interface{}{
+			"vulnerabilities_found": 1,
+			"severity_high":         1,
+		},
+	}, nil
+}
+
+// executeSemgrep simulates a Semgrep SAST scan
+func (e *WorkflowExecutor) executeSemgrep(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🔬 Executing Semgrep SAST...")
+	time.Sleep(2 * time.Second)
+
+	// Mock findings: Using main.go as it likely exists
+	output := `
+{
+  "results": [
+    {
+      "check_id": "go.lang.security.audit.xss.reflect.xss",
+      "path": "main.go",
+      "start": { "line": 1, "col": 1 },
+      "extra": { "message": "Potential XSS vulnerability detected (Simulated)" }
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "semgrep",
+		"status":  "completed",
+		"output":  output,
+	}, nil
+}
+
+// executeContainerScan simulates a Container scan
+func (e *WorkflowExecutor) executeContainerScan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🐳 Executing Container Scan...")
+	time.Sleep(2 * time.Second)
+
+	output := `
+{
+  "Image": "app:latest",
+  "OS": "alpine:3.14",
+  "Vulnerabilities": [
+    {
+      "ID": "CVE-2022-4567",
+      "Package": "openssl",
+      "Severity": "CRITICAL"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "trivy-image",
+		"status":  "completed",
+		"output":  output,
+	}, nil
 }

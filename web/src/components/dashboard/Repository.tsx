@@ -4,10 +4,15 @@ import { RepositoryHeader } from "@/components/dashboard/repository/RepositoryHe
 import { RepositoryCard } from "@/components/dashboard/repository/RepositoryCard";
 import { RepositoryLoader } from "@/components/dashboard/repository/RepositoryLoader";
 import { RepositoryError } from "@/components/dashboard/repository/RepositoryError";
+import { Button } from "@/components/ui/button";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+
+const ITEMS_PER_PAGE = 6;
 
 const RepositoryList = () => {
   const { repos, fetchRepositories, loading, error, clearError } = useGitHub();
   const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
     fetchRepositories();
@@ -34,6 +39,18 @@ const RepositoryList = () => {
     });
   }, [repos, searchQuery]);
 
+  // Pagination Logic
+  const totalPages = Math.ceil(filteredRepos.length / ITEMS_PER_PAGE);
+  const paginatedRepos = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredRepos.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredRepos, currentPage]);
+
+  // Reset to page 1 when search changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery]);
+
   const handleRetry = () => {
     clearError();
     fetchRepositories();
@@ -41,6 +58,14 @@ const RepositoryList = () => {
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
+  };
+
+  const handlePreviousPage = () => {
+    setCurrentPage((prev) => Math.max(prev - 1, 1));
+  };
+
+  const handleNextPage = () => {
+    setCurrentPage((prev) => Math.min(prev + 1, totalPages));
   };
 
   if (error) {
@@ -75,11 +100,38 @@ const RepositoryList = () => {
             </div>
           </div>
         ) : (
-          filteredRepos.map((repo) => (
+          paginatedRepos.map((repo) => (
             <RepositoryCard key={`${repo.owner}-${repo.name}`} repo={repo} />
           ))
         )}
       </div>
+      
+      {/* Pagination Controls */}
+      {filteredRepos.length > ITEMS_PER_PAGE && (
+        <div className="py-4 border-t border-gray-200 dark:border-gray-800 flex items-center justify-between">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handlePreviousPage}
+            disabled={currentPage === 1}
+          >
+            <ChevronLeft className="h-4 w-4 mr-2" />
+            Previous
+          </Button>
+          <span className="text-sm text-gray-500 dark:text-gray-400">
+            Page {currentPage} of {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleNextPage}
+            disabled={currentPage === totalPages}
+          >
+            Next
+            <ChevronRight className="h-4 w-4 ml-2" />
+          </Button>
+        </div>
+      )}
     </div>
   );
 };
