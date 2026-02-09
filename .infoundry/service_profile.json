@@ -1,0 +1,28 @@
+{
+  "services": {
+    "main": {
+      "path": "./cmd/server",
+      "has_dockerfile": false,
+      "language": "go",
+      "framework": "react",
+      "ports": [
+        5432
+      ],
+      "databases": [
+        "postgresql"
+      ]
+    },
+    "reddis": {
+      "path": "./cmd/server",
+      "has_dockerfile": false,
+      "language": "go",
+      "framework": "react",
+      "ports": [
+        54472
+      ],
+      "databases": [
+        "redis"
+      ]
+    }
+  }
+}
