@@ -1,0 +1,8 @@
+#!/bin/bash
+# Wrapper to run nmap inside the tools container
+# Resolves the absolute path to docker-compose.yml relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+DOCKER_COMPOSE_FILE="$PROJECT_ROOT/docker/docker-compose.yml"
+
+docker compose -f "$DOCKER_COMPOSE_FILE" exec -T tools nmap "$@"

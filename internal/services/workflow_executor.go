@@ -1,0 +1,999 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/datmedevil17/go-vuln/internal/models"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+type WorkflowExecutor struct {
+	db                  *gorm.DB
+	scannerService      *ScannerService
+	notificationService *NotificationService
+	aiService           *AIService
+	githubService       *GitHubService
+}
+
+func NewWorkflowExecutor(db *gorm.DB, scannerService *ScannerService, notificationService *NotificationService, aiService *AIService, githubService *GitHubService) *WorkflowExecutor {
+	return &WorkflowExecutor{
+		db:                  db,
+		scannerService:      scannerService,
+		notificationService: notificationService,
+		aiService:           aiService,
+		githubService:       githubService,
+	}
+}
+
+// WorkflowNode represents a node in the workflow graph
+type WorkflowNode struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Data     map[string]interface{} `json:"data"`
+	Position map[string]interface{} `json:"position"`
+}
+
+// WorkflowEdge represents an edge in the workflow graph
+type WorkflowEdge struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// Execute runs a workflow asynchronously
+func (e *WorkflowExecutor) Execute(workflow *models.Workflow, userID uuid.UUID) (*models.WorkflowExecution, error) {
+	// Create execution record
+	execution := &models.WorkflowExecution{
+		WorkflowID: workflow.ID,
+		UserID:     userID,
+		Status:     "pending",
+		Results:    make(models.JSONMap),
+	}
+
+	if err := e.db.Create(execution).Error; err != nil {
+		return nil, fmt.Errorf("failed to create execution record: %w", err)
+	}
+
+	execution.Name = workflow.Name
+
+	// Launch async execution
+	go e.executeAsync(execution.ID, workflow)
+
+	return execution, nil
+}
+
+// executeAsync runs the workflow in the background
+func (e *WorkflowExecutor) executeAsync(executionID uuid.UUID, workflow *models.Workflow) {
+	log.Printf("🚀 Starting workflow execution: %s", executionID)
+
+	// Update status to running
+	startTime := time.Now()
+	e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Updates(map[string]interface{}{
+		"status":     "running",
+		"started_at": startTime,
+	})
+
+	// Parse nodes and edges
+	nodes, edges, err := e.parseWorkflow(workflow)
+	if err != nil {
+		e.failExecution(executionID, fmt.Sprintf("Failed to parse workflow: %v", err))
+		return
+	}
+
+	// Get execution order
+	executionOrder, err := e.topologicalSort(nodes, edges)
+	if err != nil {
+		e.failExecution(executionID, fmt.Sprintf("Failed to sort workflow: %v", err))
+		return
+	}
+
+	log.Printf("📋 Execution order: %v", executionOrder)
+
+	// Execute nodes in order
+	results := make(map[string]interface{})
+	for _, nodeID := range executionOrder {
+		node := e.findNode(nodes, nodeID)
+		if node == nil {
+			e.failExecution(executionID, fmt.Sprintf("Node not found: %s", nodeID))
+			return
+		}
+
+		// Update current node
+		e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Update("current_node", node.Type)
+
+		log.Printf("⚙️  Executing node: %s (%s)", node.ID, node.Type)
+
+		// Execute the node
+		result, err := e.executeNode(node, results, workflow.UserID)
+		if err != nil {
+			e.failExecution(executionID, fmt.Sprintf("Node %s failed: %v", node.ID, err))
+			return
+		}
+
+		// Store result
+		results[node.ID] = result
+		e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Update("results", models.JSONMap(results))
+	}
+
+	// Generate AI Report
+	log.Printf("🤖 Generating AI Security Report...")
+	var scanSummaries string
+	for nodeID, result := range results {
+		if nodeMap, ok := result.(map[string]interface{}); ok {
+			if output, ok := nodeMap["output"].(string); ok {
+				scanSummaries += fmt.Sprintf("Node %s (%s) Output:\n%s\n\n", nodeID, nodeMap["scanner"], output)
+			}
+		}
+	}
+
+	if scanSummaries != "" {
+		aiReport, err := e.aiService.GenerateSecurityRecommendations(context.Background(), scanSummaries)
+		if err != nil {
+			log.Printf("⚠️ Failed to generate AI report: %v", err)
+			results["ai_report_error"] = err.Error()
+		} else {
+			results["ai_report"] = map[string]interface{}{
+				"ai_report":       aiReport,
+				"security_grade":  "B", // Placeholder, ideally specific extraction logic would be better but keeping it simple
+				"total_issues":    5,   // Placeholder
+				"critical_issues": 0,
+				"report_date":     time.Now(),
+				"generated_by":    "VulnPilot AI",
+			}
+			e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Update("results", models.JSONMap(results))
+		}
+	}
+
+	// Mark as completed
+	completedTime := time.Now()
+	e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Updates(map[string]interface{}{
+		"status":       "completed",
+		"completed_at": completedTime,
+		"results":      models.JSONMap(results),
+	})
+
+	log.Printf("✅ Workflow execution completed: %s (duration: %v)", executionID, completedTime.Sub(startTime))
+}
+
+// parseWorkflow extracts nodes and edges from workflow
+func (e *WorkflowExecutor) parseWorkflow(workflow *models.Workflow) ([]WorkflowNode, []WorkflowEdge, error) {
+	var nodes []WorkflowNode
+	var edges []WorkflowEdge
+
+	// Parse nodes
+	nodesBytes, err := json.Marshal(workflow.Nodes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(nodesBytes, &nodes); err != nil {
+		return nil, nil, err
+	}
+
+	// Parse edges
+	edgesBytes, err := json.Marshal(workflow.Edges)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(edgesBytes, &edges); err != nil {
+		return nil, nil, err
+	}
+
+	return nodes, edges, nil
+}
+
+// topologicalSort returns nodes in execution order
+func (e *WorkflowExecutor) topologicalSort(nodes []WorkflowNode, edges []WorkflowEdge) ([]string, error) {
+	// Build adjacency list and in-degree map
+	adjList := make(map[string][]string)
+	inDegree := make(map[string]int)
+
+	// Initialize
+	for _, node := range nodes {
+		inDegree[node.ID] = 0
+		adjList[node.ID] = []string{}
+	}
+
+	// Build graph
+	for _, edge := range edges {
+		adjList[edge.Source] = append(adjList[edge.Source], edge.Target)
+		inDegree[edge.Target]++
+	}
+
+	// Find nodes with no dependencies
+	queue := []string{}
+	for nodeID, degree := range inDegree {
+		if degree == 0 {
+			queue = append(queue, nodeID)
+		}
+	}
+
+	// Process queue
+	result := []string{}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		result = append(result, current)
+
+		// Reduce in-degree for neighbors
+		for _, neighbor := range adjList[current] {
+			inDegree[neighbor]--
+			if inDegree[neighbor] == 0 {
+				queue = append(queue, neighbor)
+			}
+		}
+	}
+
+	// Check for cycles
+	if len(result) != len(nodes) {
+		return nil, fmt.Errorf("workflow contains cycles")
+	}
+
+	return result, nil
+}
+
+// executeNode executes a single node
+func (e *WorkflowExecutor) executeNode(node *WorkflowNode, previousResults map[string]interface{}, userID uuid.UUID) (interface{}, error) {
+	switch node.Type {
+	case "trigger":
+		return e.executeTrigger(node)
+	case "nmap":
+		return e.executeNmap(node, previousResults)
+	case "nikto":
+		return e.executeNikto(node, previousResults)
+	case "gobuster":
+		return e.executeGobuster(node, previousResults)
+	case "sqlmap":
+		return e.executeSqlmap(node, previousResults)
+	case "wpscan":
+		return e.executeWpscan(node, previousResults)
+	case "email", "slack":
+		return e.executeNotification(node, previousResults, userID)
+	case "github-issue":
+		return e.executeGitHubIssue(node, previousResults, userID)
+	case "auto-fix":
+		return e.executeAutoFix(node, previousResults, userID)
+	case "owasp-vulnerabilities":
+		return e.executeNikto(node, previousResults) // Map OWASP to Nikto for now
+	case "flow-chart":
+		return e.executeFlowChart(node, previousResults)
+	case "secret-scan":
+		return e.executeSecretScan(node, previousResults)
+	case "dependency-check":
+		return e.executeDependencyCheck(node, previousResults)
+	case "semgrep-scan":
+		return e.executeSemgrep(node, previousResults)
+	case "container-scan":
+		return e.executeContainerScan(node, previousResults)
+	default:
+		return nil, fmt.Errorf("unknown node type: %s", node.Type)
+	}
+}
+
+// executeTrigger gets the target from trigger node
+func (e *WorkflowExecutor) executeTrigger(node *WorkflowNode) (interface{}, error) {
+	targetURL, ok := node.Data["sourceUrl"].(string)
+	if !ok || targetURL == "" {
+		// Fallback for demo if not set
+		targetURL = "example.com"
+	}
+
+	return map[string]interface{}{
+		"target": targetURL,
+		"type":   "trigger",
+	}, nil
+}
+
+// executeNmap runs nmap scanner
+func (e *WorkflowExecutor) executeNmap(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	// Get target from trigger node
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for nmap")
+	}
+
+	// Get config from node data if available
+	ports := "1-1000" // Default
+	if p, ok := node.Data["ports"].(string); ok && p != "" {
+		ports = p
+	}
+
+	log.Printf("🔍 Running Nmap scan on: %s ports: %s", target, ports)
+
+	output, err := e.scannerService.RunNmap(target, ports)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"scanner": "nmap",
+		"target":  target,
+		"output":  output,
+		"status":  "completed",
+	}, nil
+}
+
+// executeNikto runs nikto scanner
+func (e *WorkflowExecutor) executeNikto(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for nikto")
+	}
+
+	log.Printf("🔍 Running Nikto scan on: %s", target)
+
+	output, err := e.scannerService.RunNikto(target)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to parse JSON if possible, otherwise return raw output
+	var jsonOutput interface{}
+	if json.Unmarshal(output, &jsonOutput) == nil {
+		return map[string]interface{}{
+			"scanner": "nikto",
+			"target":  target,
+			"data":    jsonOutput,
+			"output":  string(output), // Include raw output for reporting
+			"status":  "completed",
+		}, nil
+	}
+
+	return map[string]interface{}{
+		"scanner": "nikto",
+		"target":  target,
+		"output":  string(output),
+		"status":  "completed",
+	}, nil
+}
+
+// executeGobuster runs gobuster scanner
+func (e *WorkflowExecutor) executeGobuster(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for gobuster")
+	}
+
+	wordlist := ""
+	if w, ok := node.Data["wordlist"].(string); ok {
+		wordlist = w
+	}
+
+	log.Printf("🔍 Running Gobuster scan on: %s", target)
+
+	output, err := e.scannerService.RunGobuster(target, wordlist)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"scanner": "gobuster",
+		"target":  target,
+		"output":  output,
+		"status":  "completed",
+	}, nil
+}
+
+// executeSqlmap runs sqlmap scanner
+func (e *WorkflowExecutor) executeSqlmap(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for sqlmap")
+	}
+
+	log.Printf("🔍 Running Sqlmap scan on: %s", target)
+
+	output, err := e.scannerService.RunSqlmap(target)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"scanner": "sqlmap",
+		"target":  target,
+		"output":  output,
+		"status":  "completed",
+	}, nil
+}
+
+// executeWpscan runs wpscan scanner
+func (e *WorkflowExecutor) executeWpscan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for wpscan")
+	}
+
+	log.Printf("🔍 Running WPScan on: %s", target)
+
+	output, err := e.scannerService.RunWpscan(target)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"scanner": "wpscan",
+		"target":  target,
+		"output":  output,
+		"status":  "completed",
+	}, nil
+}
+
+// executeNotification sends notification with results
+// Email nodes send email only; Slack nodes send Slack only (no duplicate emails)
+func (e *WorkflowExecutor) executeNotification(node *WorkflowNode, previousResults map[string]interface{}, userID uuid.UUID) (interface{}, error) {
+	log.Printf("📧 Sending %s notification with results", node.Type)
+
+	// Fetch user to get email
+	var user models.User
+	if err := e.db.First(&user, "id = ?", userID).Error; err != nil {
+		log.Printf("⚠️ Failed to fetch user for notification: %v", err)
+		return map[string]interface{}{
+			"type":   node.Type,
+			"status": "failed",
+			"error":  "user not found",
+		}, nil
+	}
+
+	// Get target from previous results
+	target := e.getTarget(previousResults)
+
+	// Aggregate results for AI
+	var scanSummaries string
+	for nodeID, result := range previousResults {
+		if nodeMap, ok := result.(map[string]interface{}); ok {
+			// Check for structured data first
+			if data, ok := nodeMap["data"]; ok {
+				formatted := formatScanData(data)
+				scanSummaries += fmt.Sprintf("Node %s (%s) Output:\n%s\n\n", nodeID, nodeMap["scanner"], formatted)
+			} else if output, ok := nodeMap["output"].(string); ok {
+				scanSummaries += fmt.Sprintf("Node %s (%s) Output:\n%s\n\n", nodeID, nodeMap["scanner"], output)
+			}
+
+			// Special handling for Auto-Fix results
+			if nodeType, ok := nodeMap["type"].(string); ok && nodeType == "auto-fix" {
+				status := nodeMap["status"]
+				prURL := nodeMap["pr_url"]
+				scanSummaries += fmt.Sprintf("🛠️ Auto-Fix Action (Node %s):\nStatus: %s\nPR URL: %v\n\n", nodeID, status, prURL)
+			}
+		}
+	}
+
+	// Generate Report (only when sending email or slack that needs it)
+	aiReport := "No scan data available for analysis."
+	if scanSummaries != "" {
+		report, err := e.aiService.GenerateSecurityRecommendations(context.Background(), scanSummaries)
+		if err == nil {
+			aiReport = report
+		} else {
+			log.Printf("⚠️ Failed to generate AI report for notification: %v", err)
+			aiReport = fmt.Sprintf("AI Analysis Failed: %v", err)
+		}
+	}
+
+	switch node.Type {
+	case "email":
+		// Email node: send workflow report via email only
+		recipientEmail := e.getNotificationEmail(node, user.Email)
+		if recipientEmail == "" {
+			log.Printf("⚠️ No recipient email available for email notification")
+			return map[string]interface{}{
+				"type":   node.Type,
+				"status": "failed",
+				"error":  "no recipient email provided",
+			}, nil
+		}
+		log.Printf("📧 Sending email to: %s", recipientEmail)
+		if err := e.notificationService.SendWorkflowReport(recipientEmail, target, "completed", aiReport); err != nil {
+			log.Printf("⚠️ Failed to send email to %s: %v", recipientEmail, err)
+			return map[string]interface{}{
+				"type":   node.Type,
+				"status": "failed",
+				"error":  err.Error(),
+			}, nil
+		}
+		return map[string]interface{}{"type": node.Type, "status": "sent"}, nil
+
+	case "slack":
+		// Slack node: send to Slack only (not email)
+		attachments := []Attachment{
+			{
+				Color: "good",
+				Title: "Security Workflow Completed",
+				Text:  aiReport,
+				Fields: []Field{
+					{Title: "Target", Value: target, Short: true},
+					{Title: "Status", Value: "completed", Short: true},
+				},
+			},
+		}
+		if err := e.notificationService.SendSlackNotification("VulnPilot Security Workflow Report", attachments); err != nil {
+			log.Printf("⚠️ Failed to send Slack notification: %v", err)
+			return map[string]interface{}{
+				"type":   node.Type,
+				"status": "failed",
+				"error":  err.Error(),
+			}, nil
+		}
+		return map[string]interface{}{"type": node.Type, "status": "sent"}, nil
+
+	default:
+		return map[string]interface{}{
+			"type":   node.Type,
+			"status": "skipped",
+			"error":  "unknown notification type",
+		}, nil
+	}
+}
+
+// getNotificationEmail extracts recipient from node config or user
+func (e *WorkflowExecutor) getNotificationEmail(node *WorkflowNode, defaultEmail string) string {
+	if config, ok := node.Data["config"].(map[string]interface{}); ok {
+		if email, ok := config["email"].(string); ok && email != "" {
+			return email
+		}
+		if to, ok := config["to"].(string); ok && to != "" {
+			return to
+		}
+	}
+	if email, ok := node.Data["email"].(string); ok && email != "" {
+		return email
+	}
+	if to, ok := node.Data["to"].(string); ok && to != "" {
+		return to
+	}
+	return defaultEmail
+}
+
+// getTarget extracts target from previous results
+func (e *WorkflowExecutor) getTarget(previousResults map[string]interface{}) string {
+	for _, result := range previousResults {
+		if resultMap, ok := result.(map[string]interface{}); ok {
+			if target, ok := resultMap["target"].(string); ok {
+				return target
+			}
+		}
+	}
+	return ""
+}
+
+// findNode finds a node by ID
+func (e *WorkflowExecutor) findNode(nodes []WorkflowNode, nodeID string) *WorkflowNode {
+	for i := range nodes {
+		if nodes[i].ID == nodeID {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+// failExecution marks execution as failed
+func (e *WorkflowExecutor) failExecution(executionID uuid.UUID, errorMsg string) {
+	log.Printf("❌ Workflow execution failed: %s - %s", executionID, errorMsg)
+	completedTime := time.Now()
+	e.db.Model(&models.WorkflowExecution{}).Where("id = ?", executionID).Updates(map[string]interface{}{
+		"status":       "failed",
+		"error":        errorMsg,
+		"completed_at": completedTime,
+	})
+}
+
+// executeGitHubIssue creates a GitHub issue with results
+func (e *WorkflowExecutor) executeGitHubIssue(node *WorkflowNode, previousResults map[string]interface{}, userID uuid.UUID) (interface{}, error) {
+	log.Printf("🐙 Creating GitHub Issue")
+
+	// Fetch user to get access token
+	var user models.User
+	if err := e.db.First(&user, "id = ?", userID).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch user: %v", err)
+	}
+
+	if user.AccessToken == "" {
+		return nil, fmt.Errorf("user has no GitHub access token")
+	}
+
+	// Get target from previous results
+	target := e.getTarget(previousResults)
+	if target == "" {
+		return nil, fmt.Errorf("no target found for issue creation")
+	}
+
+	// Parse owner/repo from target (e.g. https://github.com/owner/repo)
+	var owner, repo string
+	const githubPrefix = "https://github.com/"
+	if len(target) >= len(githubPrefix) && target[:len(githubPrefix)] == githubPrefix {
+		parts := splitParam(target[len(githubPrefix):], "/")
+		if len(parts) >= 2 {
+			owner = parts[0]
+			repo = parts[1]
+		}
+	}
+
+	// Fallback: check if node data has owner/repo
+	if val, ok := node.Data["owner"].(string); ok && val != "" {
+		owner = val
+	}
+	if val, ok := node.Data["repo"].(string); ok && val != "" {
+		repo = val
+	}
+
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("could not determine GitHub owner/repo from target: %s", target)
+	}
+
+	// Aggregate results for Issue Body
+	var scanSummaries string
+	for nodeID, result := range previousResults {
+		if nodeMap, ok := result.(map[string]interface{}); ok {
+			// Check for structured data first
+			if data, ok := nodeMap["data"]; ok {
+				formatted := formatScanData(data)
+				scanSummaries += fmt.Sprintf("## Scan: %s (Node %s)\n%s\n\n", nodeMap["scanner"], nodeID, formatted)
+			} else if output, ok := nodeMap["output"].(string); ok {
+				scanSummaries += fmt.Sprintf("## Scan: %s (Node %s)\n```\n%s\n```\n\n", nodeMap["scanner"], nodeID, output)
+			}
+		}
+	}
+
+	// Generate Issue Content
+	title := fmt.Sprintf("Security Vulnerabilities Detected in %s/%s", owner, repo)
+	body := fmt.Sprintf("# Security Scan Results\n\nAutomated scan detected potential issues.\n\n%s\n\n*Report generated by VulnPilot*", scanSummaries)
+
+	// Use AI to generate better title/body if available
+	if scanSummaries != "" {
+		aiRecommendation, err := e.aiService.GenerateSecurityRecommendations(context.Background(), scanSummaries)
+		if err == nil {
+			body = fmt.Sprintf("# Security Analysis\n\n%s\n\n## Raw Logs\n\n%s", aiRecommendation, scanSummaries)
+		}
+	}
+
+	// Create Issue
+	issue, err := e.githubService.CreateIssue(context.Background(), user.AccessToken, owner, repo, title, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create github issue: %v", err)
+	}
+
+	log.Printf("✅ Created GitHub Issue #%d: %s", issue.Number, issue.HTMLURL)
+
+	return map[string]interface{}{
+		"type":       "github-issue",
+		"issue_url":  issue.HTMLURL,
+		"issue_id":   issue.ID,
+		"status":     "created",
+		"repository": fmt.Sprintf("%s/%s", owner, repo),
+	}, nil
+}
+
+func (e *WorkflowExecutor) executeAutoFix(node *WorkflowNode, previousResults map[string]interface{}, userID uuid.UUID) (interface{}, error) {
+	log.Printf("🔧 Execute Auto-Fix Agent")
+
+	// 1. Authenticate
+	var user models.User
+	if err := e.db.First(&user, "id = ?", userID).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch user: %v", err)
+	}
+
+	if user.AccessToken == "" {
+		return nil, fmt.Errorf("user has no GitHub access token")
+	}
+
+	// 2. Parse Context (Owner, Repo, Path, Branch)
+	target := e.getTarget(previousResults)
+	owner, repo := e.parseGitHubTarget(target)
+
+	if val, ok := node.Data["owner"].(string); ok && val != "" {
+		owner = val
+	}
+	if val, ok := node.Data["repo"].(string); ok && val != "" {
+		repo = val
+	}
+
+	path, _ := node.Data["path"].(string)
+	branch := "main" // Default
+	if val, ok := node.Data["branch"].(string); ok && val != "" {
+		branch = val
+	}
+
+	// Dynamic Path Inference
+	// If path is missing, try to find it in previous scanner results
+	if path == "" {
+		log.Printf("🔍 Path not provided. searching previous scanner results...")
+		for _, result := range previousResults {
+			if resMap, ok := result.(map[string]interface{}); ok {
+				// Check Gitleaks/Semgrep findings
+				if output, ok := resMap["output"].(string); ok {
+					// Extremely simple heuristic to find a file path in JSON
+					// In a real app, unmarshal properly based on scanner type
+					if strings.Contains(output, `"file": "`) {
+						start := strings.Index(output, `"file": "`) + 9
+						end := strings.Index(output[start:], `"`)
+						if start > 9 && end > 0 {
+							path = output[start : start+end]
+							log.Printf("🎯 Inferred path from scanner: %s", path)
+							break
+						}
+					}
+					// Semgrep style
+					if strings.Contains(output, `"path": "`) {
+						start := strings.Index(output, `"path": "`) + 9
+						end := strings.Index(output[start:], `"`)
+						if start > 9 && end > 0 {
+							path = output[start : start+end]
+							log.Printf("🎯 Inferred path from scanner: %s", path)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if owner == "" || repo == "" || path == "" {
+		return nil, fmt.Errorf("auto-fix requires owner, repo, and path (target: %s). Could not infer path from scanner results.", target)
+	}
+
+	// 3. Fetch File Content
+	log.Printf("📖 Reading file: %s/%s/%s", owner, repo, path)
+	content, err := e.githubService.GetFileContent(context.Background(), user.AccessToken, owner, repo, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %v", err)
+	}
+
+	// 4. Identify Vulnerability
+	vulnerability, _ := node.Data["vulnerability"].(string)
+	if vulnerability == "" {
+		// If not provided, analyze the code now
+		log.Printf("🔍 Analyzing code for vulnerabilities...")
+
+		// Check for previous scanner results to help the analysis
+		var scannerContext string
+		for _, result := range previousResults {
+			if resMap, ok := result.(map[string]interface{}); ok {
+				if output, ok := resMap["output"].(string); ok {
+					scannerContext += fmt.Sprintf("Scanner Output (%s):\n%s\n\n", resMap["scanner"], output)
+				}
+			}
+		}
+
+		// Heuristic: determine language from extension
+		lang := "go" // default
+		// ... simplified language detection ...
+
+		// Pass scanner context if available
+		inputContext := content
+		if scannerContext != "" {
+			inputContext = fmt.Sprintf("SCANNER FINDINGS:\n%s\n\nCODE TO FIX:\n%s", scannerContext, content)
+		}
+
+		analysis, err := e.aiService.AnalyzeCode(context.Background(), inputContext, lang)
+		if err != nil {
+			return nil, fmt.Errorf("analysis failed: %v", err)
+		}
+		vulnerability = analysis
+	}
+
+	// 5. Generate Fix
+	log.Printf("🤖 Generating fix for vulnerability...")
+	fixedCode, err := e.aiService.GenerateFix(context.Background(), content, vulnerability)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate fix: %v", err)
+	}
+
+	// 6. Create Branch
+	fixBranch := fmt.Sprintf("fix/vuln-%d", time.Now().Unix())
+	log.Printf("🌿 Creating branch: %s", fixBranch)
+
+	// Get base SHA
+	ref, err := e.githubService.GetReference(context.Background(), user.AccessToken, owner, repo, "heads/"+branch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get base ref: %v", err)
+	}
+
+	// Create branch
+	if err := e.githubService.CreateBranch(context.Background(), user.AccessToken, owner, repo, fixBranch, ref.Object.Sha); err != nil {
+		return nil, fmt.Errorf("failed to create branch: %v", err)
+	}
+
+	// 7. Update File (Commit)
+	// Get file SHA for update
+	fileSha, err := e.githubService.GetFileSHA(context.Background(), user.AccessToken, owner, repo, path, fixBranch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file sha: %v", err)
+	}
+
+	log.Printf("💾 Committing fix...")
+	if err := e.githubService.UpdateFile(context.Background(), user.AccessToken, owner, repo, path, fixedCode, fileSha, "fix: resolve security vulnerability", fixBranch); err != nil {
+		return nil, fmt.Errorf("failed to update file: %v", err)
+	}
+
+	// 8. Create Pull Request
+	log.Printf("🚀 Creating Pull Request...")
+	prTitle := "fix: resolve security vulnerability in " + path
+	prBody := fmt.Sprintf("This PR fixes a detected vulnerability.\n\n**Vulnerability:**\n%s\n\n*Generated by VulnPilot*", vulnerability)
+
+	pr, err := e.githubService.CreatePullRequest(context.Background(), user.AccessToken, owner, repo, prTitle, prBody, fixBranch, branch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PR: %v", err)
+	}
+
+	return map[string]interface{}{
+		"type":      "auto-fix",
+		"pr_url":    pr.HTMLURL,
+		"pr_number": pr.Number,
+		"status":    "created",
+		"branch":    fixBranch,
+		"output":    fmt.Sprintf("Auto-Fix PR Created: %s", pr.HTMLURL),
+	}, nil
+}
+
+func (e *WorkflowExecutor) parseGitHubTarget(target string) (string, string) {
+	const githubPrefix = "https://github.com/"
+	if len(target) >= len(githubPrefix) && target[:len(githubPrefix)] == githubPrefix {
+		parts := splitParam(target[len(githubPrefix):], "/")
+		if len(parts) >= 2 {
+			return parts[0], parts[1]
+		}
+	}
+	return "", ""
+}
+
+func splitParam(s, sep string) []string {
+	var parts []string
+	current := ""
+	for i := 0; i < len(s); i++ {
+		if string(s[i]) == sep {
+			parts = append(parts, current)
+			current = ""
+		} else {
+			current += string(s[i])
+		}
+	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+	return parts
+}
+
+// executeFlowChart handles flow-chart nodes (pass-through)
+func (e *WorkflowExecutor) executeFlowChart(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("📊 Executing Flow Chart Node (Pass-through)")
+
+	target := e.getTarget(previousResults)
+
+	return map[string]interface{}{
+		"type":   "flow-chart",
+		"status": "completed",
+		"target": target,
+	}, nil
+}
+
+func formatScanData(data interface{}) string {
+	// If it's the specific Nikto format we use
+	if dataMap, ok := data.(map[string]interface{}); ok {
+		if vulns, ok := dataMap["vulnerabilities"].([]interface{}); ok {
+			var formatted string
+			for _, v := range vulns {
+				if vStr, ok := v.(string); ok {
+					formatted += fmt.Sprintf("- %s\n", vStr)
+				}
+			}
+			if formatted != "" {
+				return formatted
+			}
+		}
+	}
+
+	// Fallback to pretty JSON
+	bytes, _ := json.MarshalIndent(data, "", "  ")
+	return fmt.Sprintf("```json\n%s\n```", string(bytes))
+}
+
+// executeSecretScan simulates a Gitleaks scan
+func (e *WorkflowExecutor) executeSecretScan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🔑 Executing Secret Scan (Gitleaks)...")
+	time.Sleep(2 * time.Second) // Simulate work
+
+	// Mock findings: Using README.md as it likely exists in any repo
+	output := `
+{
+  "findings": [
+    {
+      "rule": "generic-secret",
+      "file": "README.md",
+      "startLine": 1,
+      "secret": "password123",
+      "message": "Simulated secret found for Auto-Fix testing"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "gitleaks",
+		"status":  "completed",
+		"output":  output,
+		"data": map[string]interface{}{
+			"leaked_secrets": 1,
+			"files_scanned":  15,
+		},
+	}, nil
+}
+
+// executeDependencyCheck simulates a Trivy/SCA scan
+func (e *WorkflowExecutor) executeDependencyCheck(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("📦 Executing Dependency Check (Trivy)...")
+	time.Sleep(2 * time.Second)
+
+	output := `
+{
+  "Target": "go.mod",
+  "Vulnerabilities": [
+    {
+      "VulnerabilityID": "CVE-2023-1234",
+      "PkgName": "golang.org/x/net",
+      "InstalledVersion": "v0.7.0",
+      "FixedVersion": "v0.17.0",
+      "Severity": "HIGH"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "trivy-sca",
+		"status":  "completed",
+		"output":  output,
+		"data": map[string]interface{}{
+			"vulnerabilities_found": 1,
+			"severity_high":         1,
+		},
+	}, nil
+}
+
+// executeSemgrep simulates a Semgrep SAST scan
+func (e *WorkflowExecutor) executeSemgrep(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🔬 Executing Semgrep SAST...")
+	time.Sleep(2 * time.Second)
+
+	// Mock findings: Using main.go as it likely exists
+	output := `
+{
+  "results": [
+    {
+      "check_id": "go.lang.security.audit.xss.reflect.xss",
+      "path": "main.go",
+      "start": { "line": 1, "col": 1 },
+      "extra": { "message": "Potential XSS vulnerability detected (Simulated)" }
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "semgrep",
+		"status":  "completed",
+		"output":  output,
+	}, nil
+}
+
+// executeContainerScan simulates a Container scan
+func (e *WorkflowExecutor) executeContainerScan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
+	log.Printf("🐳 Executing Container Scan...")
+	time.Sleep(2 * time.Second)
+
+	output := `
+{
+  "Image": "app:latest",
+  "OS": "alpine:3.14",
+  "Vulnerabilities": [
+    {
+      "ID": "CVE-2022-4567",
+      "Package": "openssl",
+      "Severity": "CRITICAL"
+    }
+  ]
+}`
+	return map[string]interface{}{
+		"scanner": "trivy-image",
+		"status":  "completed",
+		"output":  output,
+	}, nil
+}
