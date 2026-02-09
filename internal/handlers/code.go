@@ -58,7 +58,15 @@ func (h *CodeHandler) AnalyzeCode(c *gin.Context) {
 	vulnerabilities := h.embeddingService.FindVulnerabilityPatterns(req.Code, req.Language)
 
 	// Get AI analysis
-	analysis, err := h.aiService.AnalyzeCode(c.Request.Context(), req.Code, req.Language)
+	var analysis string
+	// If Filename is present, it's treated as a user question/query (from ChatAssistant)
+	if req.Filename != "" {
+		analysis, err = h.aiService.AnalyzeCodeWithQuery(c.Request.Context(), req.Code, req.Language, req.Filename)
+	} else {
+		// Standard vulnerability scan
+		analysis, err = h.aiService.AnalyzeCode(c.Request.Context(), req.Code, req.Language)
+	}
+
 	if err != nil {
 		// If AI fails, still return pattern-based results
 		analysis = "AI analysis unavailable. Showing pattern-based analysis only."

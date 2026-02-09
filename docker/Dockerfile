@@ -51,7 +51,33 @@ RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap 
 RUN wget https://github.com/OJ/gobuster/releases/download/v3.6.0/gobuster_Linux_x86_64.tar.gz \
     && tar -xzf gobuster_Linux_x86_64.tar.gz \
     && mv gobuster /usr/local/bin/ \
+    && mv gobuster /usr/local/bin/ \
     && rm gobuster_Linux_x86_64.tar.gz
+
+# Install Trivy (Container & IaC Scanner)
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+# Install Kube-Bench
+RUN curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.8.0/kube-bench_0.8.0_linux_amd64.tar.gz -o kube-bench.tar.gz && \
+    tar -xvf kube-bench.tar.gz && \
+    mv kube-bench /usr/local/bin/ && \
+    mkdir -p /etc/kube-bench && \
+    mv cfg /etc/kube-bench/ && \
+    rm kube-bench.tar.gz
+
+# Install OPA (Policy Check)
+RUN curl -L -o opa https://openpolicyagent.org/downloads/v0.70.0/opa_linux_amd64_static && \
+    chmod 755 ./opa && \
+    mv opa /usr/local/bin/
+
+# Install Infracost (Cost Config)
+RUN curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+
+# Install Semgrep (SAST)
+# Note: Semgrep on Alpine can be tricky, ensuring we have builddeps
+RUN apk add --no-cache build-base python3-dev libffi-dev && \
+    pip3 install semgrep && \
+    apk del build-base python3-dev libffi-dev
 
 # Create non-root user
 RUN addgroup -g 1000 vulnpilot && \

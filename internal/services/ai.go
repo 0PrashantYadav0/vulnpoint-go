@@ -84,6 +84,37 @@ Code:
 	}
 
 	return "", fmt.Errorf("no AI API keys configured")
+	return "", fmt.Errorf("no AI API keys configured")
+}
+
+// AnalyzeCodeWithQuery uses AI to analyze code with a specific user question
+func (s *AIService) AnalyzeCodeWithQuery(ctx context.Context, code string, language string, query string) (string, error) {
+	prompt := fmt.Sprintf(`You are a Senior Software Engineer acting as a Code Assistant. 
+User Question: "%s"
+
+Code Context (%s):
+%s
+
+Please answer the user's question accurately based on the provided code. 
+If the question is about security, provide a detailed analysis. 
+If the request is to summarize or explain, do so clearly.`, query, language, code)
+
+	// Try Gemini first, fallback to Groq
+	if s.config.AI.GeminiAPIKey != "" {
+		result, err := s.callGemini(ctx, prompt)
+		if err == nil {
+			return result, nil
+		}
+	}
+
+	if s.config.AI.GroqAPIKey != "" {
+		result, err := s.callGroq(ctx, prompt)
+		if err == nil {
+			return result, nil
+		}
+	}
+
+	return "", fmt.Errorf("no AI API keys configured")
 }
 
 // GenerateSecurityRecommendations generates security recommendations
@@ -210,6 +241,54 @@ func cleanJSON(s string) string {
 		}
 	}
 	return s
+}
+
+func cleanCodeBlock(s string) string {
+	// Remove markdown code block wrappers like ```terraform or ```hcl
+	if len(s) > 3 && s[:3] == "```" {
+		// Find first newline
+		newline := 0
+		for i := 0; i < len(s); i++ {
+			if s[i] == '\n' {
+				newline = i
+				break
+			}
+		}
+		if newline > 0 {
+			s = s[newline+1:]
+		}
+		if len(s) > 3 && s[len(s)-3:] == "```" {
+			s = s[:len(s)-3]
+		}
+	}
+	return s
+}
+
+// GenerateIaC generates Infrastructure as Code based on requirements
+func (s *AIService) GenerateIaC(ctx context.Context, requirements string) (string, error) {
+	prompt := fmt.Sprintf(`You are a DevOps Expert. Generate Terraform Infrastructure as Code (IaC) based on the following requirements:
+"%s"
+
+Return ONLY the Terraform code. Do not include markdown formatting or explanations.
+If the requirements are vague, generate a standard secure AWS ECS + RDS setup.
+`, requirements)
+
+	// Try Gemini first, fallback to Groq
+	if s.config.AI.GeminiAPIKey != "" {
+		result, err := s.callGemini(ctx, prompt)
+		if err == nil {
+			return cleanCodeBlock(result), nil
+		}
+	}
+
+	if s.config.AI.GroqAPIKey != "" {
+		result, err := s.callGroq(ctx, prompt)
+		if err == nil {
+			return cleanCodeBlock(result), nil
+		}
+	}
+
+	return "", fmt.Errorf("no AI API keys configured")
 }
 
 // GenerateDocumentation generates project documentation using Groq

@@ -43,6 +43,11 @@ const NodeConfigDialog = ({
   // Slack config
   const [channel, setChannel] = useState(initialData?.channel || "");
 
+
+
+  // Container Scan config
+  const [image, setImage] = useState(initialData?.image || "");
+
   // GitHub repos
   const githubRepos: string[] = JSON.parse(
     localStorage.getItem("repos") || "[]"
@@ -63,6 +68,8 @@ const NodeConfigDialog = ({
         path: initialData?.path || "",
         vulnerability: initialData?.vulnerability || ""
       };
+    } else if (nodeType === "container-scan") {
+      configData = { image };
     }
 
     onSave(configData);
@@ -144,6 +151,21 @@ const NodeConfigDialog = ({
               />
               <p className="text-xs text-muted-foreground">
                 ⚠️ Workflow will require manual approval if estimated cost exceeds this amount.
+              </p>
+            </div>
+          )}
+
+          {nodeType === "container-scan" && (
+            <div className="space-y-2">
+              <Label htmlFor="image">Container Image</Label>
+              <Input
+                id="image"
+                value={image}
+                onChange={(e) => setImage(e.target.value)}
+                placeholder="e.g. nginx:latest"
+              />
+              <p className="text-xs text-muted-foreground">
+                🐳 Specify the Docker image tag to scan.
               </p>
             </div>
           )}

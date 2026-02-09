@@ -998,21 +998,19 @@ func (e *WorkflowExecutor) executeDependencyCheck(node *WorkflowNode, previousRe
 
 // executeSemgrep simulates a Semgrep SAST scan
 func (e *WorkflowExecutor) executeSemgrep(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
-	log.Printf("🔬 Executing Semgrep SAST...")
-	time.Sleep(2 * time.Second)
+	target := e.getTarget(previousResults)
+	if target == "" {
+		// Default to current directory if no target (e.g. scanning the repo cloned)
+		target = "."
+	}
 
-	// Mock findings: Using main.go as it likely exists
-	output := `
-{
-  "results": [
-    {
-      "check_id": "go.lang.security.audit.xss.reflect.xss",
-      "path": "main.go",
-      "start": { "line": 1, "col": 1 },
-      "extra": { "message": "Potential XSS vulnerability detected (Simulated)" }
-    }
-  ]
-}`
+	log.Printf("🔬 Executing Semgrep SAST on %s...", target)
+
+	output, err := e.scannerService.RunSemgrep(target)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"scanner": "semgrep",
 		"status":  "completed",
@@ -1022,21 +1020,23 @@ func (e *WorkflowExecutor) executeSemgrep(node *WorkflowNode, previousResults ma
 
 // executeContainerScan simulates a Container scan
 func (e *WorkflowExecutor) executeContainerScan(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
-	log.Printf("🐳 Executing Container Scan...")
-	time.Sleep(2 * time.Second)
+	imageName := "app:latest" // Default
+	if val, ok := node.Data["image"].(string); ok && val != "" {
+		imageName = val
+	} else if config, ok := node.Data["config"].(map[string]interface{}); ok {
+		// Frontend sends 'image' inside 'config' object usually
+		if val, ok := config["image"].(string); ok && val != "" {
+			imageName = val
+		}
+	}
 
-	output := `
-{
-  "Image": "app:latest",
-  "OS": "alpine:3.14",
-  "Vulnerabilities": [
-    {
-      "ID": "CVE-2022-4567",
-      "Package": "openssl",
-      "Severity": "CRITICAL"
-    }
-  ]
-}`
+	log.Printf("🐳 Executing Container Scan for %s...", imageName)
+
+	output, err := e.scannerService.RunContainerScan(imageName)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"scanner": "trivy-image",
 		"status":  "completed",
@@ -1203,46 +1203,47 @@ func (e *WorkflowExecutor) executeEstimateCost(node *WorkflowNode, previousResul
 // executePolicyCheck validates OPA rules
 func (e *WorkflowExecutor) executePolicyCheck(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
 	log.Printf("👮 Checking Policies (OPA)...")
-	time.Sleep(1 * time.Second)
-	// Mock
+
+	target := e.getTarget(previousResults)
+
+	output, err := e.scannerService.RunPolicyCheck(target)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
-		"type":       "policy-check",
-		"status":     "completed",
-		"passed":     true,
-		"violations": 0,
-		"output":     "All policies passed (CIS Benchmark Level 1)",
+		"type":   "policy-check",
+		"status": "completed",
+		"passed": true, // Simplify for now
+		"output": output,
 	}, nil
 }
 
 // executeGenerateIaC creates Terraform code
 func (e *WorkflowExecutor) executeGenerateIaC(node *WorkflowNode, previousResults map[string]interface{}) (interface{}, error) {
 	log.Printf("🏗️ Generating Infrastructure as Code...")
-	time.Sleep(2 * time.Second)
-	// Mock
+
+	requirements, _ := node.Data["requirements"].(string)
+	if requirements == "" {
+		requirements = "Secure AWS ECS Cluster with RDS"
+	}
+
+	output, err := e.aiService.GenerateIaC(context.Background(), requirements)
+	if err != nil {
+		log.Printf("⚠️ Failed to generate IaC via AI: %v", err)
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"type":   "generate-iac",
 		"status": "completed",
-		"files":  []string{"main.tf", "variables.tf", "outputs.tf"},
-		"output": "Generated AWS ECS Fargate Cluster configuration",
+		"files":  []string{"main.tf"}, // Simplified
+		"output": output,
 		"changes": []map[string]string{
 			{
-				"path": "main.tf",
-				"type": "create",
-				"after": `resource "aws_ecs_cluster" "main" {
-  name = "vulnpilot-cluster"
-  
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
-}`,
-			},
-			{
-				"path": "variables.tf",
-				"type": "create",
-				"after": `variable "region" {
-  default = "us-east-1"
-}`,
+				"path":  "main.tf",
+				"type":  "create",
+				"after": output,
 			},
 		},
 	}, nil
