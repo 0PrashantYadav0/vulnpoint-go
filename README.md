@@ -373,6 +373,40 @@ make test
 make test-coverage
 ```
 
+
+## 🚀 Deployment
+
+The application is containerized using Docker, making it easy to deploy to any cloud provider that supports Docker containers (AWS ECS, Google Cloud Run, DigitalOcean App Platform, etc.).
+
+### Build the Docker Image
+
+```bash
+docker build -t vulnpilot .
+```
+
+### Run the Container
+
+You will need a PostgreSQL database runnning and accessible to the container.
+
+```bash
+docker run -p 8080:8080 \
+  -e DB_HOST=your_db_host \
+  -e DB_PORT=5432 \
+  -e DB_USER=your_db_user \
+  -e DB_PASSWORD=your_db_password \
+  -e DB_NAME=your_db_name \
+  -e JWT_SECRET=your_production_secret \
+  vulnpilot
+```
+
+### Using Docker Compose
+
+For a complete stack including Database and Redis:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
 ## 📝 License
 
 MIT License - see LICENSE file for details
@@ -388,4 +422,3 @@ For questions or support, please open an issue on GitHub.
 ---
 
 Built with ❤️ using Go, PostgreSQL, Redis, and AI
-# vulnpoint-go
