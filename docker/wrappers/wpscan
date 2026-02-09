@@ -1,6 +1,0 @@
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-DOCKER_COMPOSE_FILE="$PROJECT_ROOT/docker/docker-compose.yml"
-
-docker compose -f "$DOCKER_COMPOSE_FILE" exec -T tools wpscan "$@"
